@@ -2,10 +2,11 @@
 
 import socket
 import select
+import sys
 
 if __name__ == '__main__':
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect(('vdr', 37890))
+    s.connect((sys.argv[1], 37890))
     s.send('CONTROL\r\n'.encode('utf-8'))
 
     data = s.recv(1024).decode('utf-8').split('\r\n')
