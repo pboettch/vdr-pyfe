@@ -74,7 +74,9 @@ def data_thread(login: str):
 
         if reset_vlc:
             if vlc is not None:
-                vlc.kill()
+                vlc.stdin.close()
+                vlc.send_signal(2)
+                vlc.wait()
                 vlc = None
             reset_vlc = False
     s.close()
