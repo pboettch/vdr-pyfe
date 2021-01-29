@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 
-import socket
 import argparse
-import sys
+import evdev
+from evdev import ecodes
+import selectors
+import socket
 import struct
-from threading import Thread
 from subprocess import Popen, PIPE
+import sys
+from threading import Thread
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,6 +23,7 @@ data_thread_running = False
 reset_vlc = False
 args = None
 osd = None
+
 
 def read_exact(s: socket.socket, l: int):
     data = b''
@@ -39,15 +43,13 @@ def data_thread(login: str):
     eprint('data-thread start')
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect(('vdr', 37890))
+    s.connect((args.hostname[0], 37890))
 
     s.send((login + '\r\n').encode('utf-8'))
 
     data = s.recv(6).decode('utf-8')
     if data != 'DATA\r\n':
         eprint('unexpected response DATA, got', data)
-
-    # with os.fdopen(sys.stdout.fileno(), 'wb') as o:
 
     data_thread_running = True
 
@@ -71,7 +73,7 @@ def data_thread(login: str):
 
         total += l
         if total > 5e7:
-            print('50MB received', total)
+            eprint('50MB received', total)
             total = 0
 
         if vlc is None:
@@ -139,13 +141,13 @@ class OSD:
         sub_image = self.image[pos[1]:pos[1] + dim[1], pos[0]:pos[0] + dim[0]]
         sub_image[::] = 0
 
-        print(pos, dim, dirty)
+        eprint(pos, dim, dirty)
 
         while i < len(b):
             if x > dim[0]:
-                print('not good, width')
+                eprint('not good, width')
             if y > dim[1]:
-                print('not good, height')
+                eprint('not good, height')
 
             if b[i] != 0:
                 # one pixel
@@ -174,7 +176,7 @@ class OSD:
 
             rle += 1
 
-        # print(i, num_rle, rle )
+        # eprint(i, num_rle, rle )
         if args.osd:
             plt.clf()
             plt.imshow(self.image)
@@ -185,11 +187,11 @@ class OSD:
         self.image = np.zeros((h, w, 4), dtype=np.uint8)
 
     def flush(self):
-        print('flush')
+        eprint('flush')
         self.image[:] = 0
 
     def close(self):
-        print('close')
+        eprint('close')
         if args.osd:
             plt.clf()
             plt.draw()
@@ -284,11 +286,24 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--osd',
                         help='enable OSD-display in with matplotlib, for debugging only',
                         action='store_true')
+    parser.add_argument('--list-event-devices',
+                        help='list all available input devices',
+                        action='store_true')
+    parser.add_argument('-e', '--event-device',
+                        help='event device to be used for input',
+                        type=str)
     parser.add_argument('hostname',
                         help='hostname of VDR-server',
                         nargs=1)
 
     args = parser.parse_args()
+
+    if args.list_event_devices:
+        eprint('available input devices (make sure adding your user to the input-group')
+        devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
+        for device in devices:
+            eprint(' ', device.path, device.name, device.phys)
+        sys.exit(0)
 
     osd = OSD()
 
@@ -298,7 +313,7 @@ if __name__ == '__main__':
 
     data = s.recv(1024).decode('utf-8').split('\r\n')
     if not data[0].startswith('VDR') and data[0].endswith('READY'):
-        print('error READY')
+        eprint('error READY')
 
     client_id = int(data[1].split(' ')[1])
 
@@ -307,34 +322,61 @@ if __name__ == '__main__':
     uint = (uint[0] << 24) | (uint[1] << 16) | (uint[2] << 8) | (uint[3] << 0)
     out = f'DATA {client_id} 0x{uint:08x}:{control_sockname[1]} {control_sockname[0]}'
 
-    print('waiting for data-thread to run')
+    # yeah, let's add a thread and have no way to stop it correctly!
+    eprint('waiting for data-thread to run')
     data_thread = Thread(target=data_thread, args=[out])
     data_thread.start()
     while not data_thread_running:
         sleep(0.1)
-    print('data-thread is running')
+    eprint('data-thread is running')
 
     s.send('INFO WINDOWS 1280x720\r\n'.encode('utf-8'))
     s.send('INFO ARGBOSD RLE\r\n'.encode('utf-8'))
     s.send('CONFIG\r\n'.encode('utf-8'))
 
+    sel = selectors.DefaultSelector()
+    sel.register(s, selectors.EVENT_READ)
+
+    if args.event_device:
+        event_device = evdev.InputDevice(args.event_device)
+        sel.register(event_device, selectors.EVENT_READ)
+    else:
+        event_device = None
+
+    # for event in device.read_loop():
+    #     if event.
+    #         if event.type == evdev.ecodes.EV_KEY:
+    #             eprint(evdev.categorize(event))
+
     line = b""
-    while True:
-        b = s.recv(1)
+    connected = True
+    while connected:
+        for key, mask in sel.select():
+            device = key.fileobj
+            if device == s:
+                b = s.recv(1)
+                if len(b) == 0:
+                    eprint('error while reading - connection closed probably')
+                    connected = False
+                    break
 
-        if len(b) == 0:
-            eprint('error while reading - connection closed probably')
-            break
+                if b == b'\n':
+                    process_line(s, line.decode('utf-8'))
+                    line = b""
+                elif b == b'\r':
+                    pass
+                else:
+                    line += b
+            elif device == event_device:
+                for event in device.read():
+                    if event.type == evdev.ecodes.EV_KEY and event.value in [1, 2]:
+                        k = ecodes.KEY[event.code].split('_')[1].lower()
+                        s.send(f'KEY {k}\r\n'.encode('utf-8'))
+                        print(k)
 
-        if b == b'\n':
-            process_line(s, line.decode('utf-8'))
-            line = b""
-        elif b == b'\r':
-            pass
-        else:
-            line += b
-
-    data_thread.join()
-    print("thread finished...exiting")
 
     s.close()
+
+    # yeah, that's right, have the thread magically stop
+    data_thread.join()
+    eprint("thread finished...exiting")
