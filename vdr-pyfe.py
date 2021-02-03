@@ -8,7 +8,7 @@ import socket
 import struct
 from subprocess import Popen, PIPE
 import sys
-from threading import Thread
+import time
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,10 +17,6 @@ from enum import Enum
 
 from typing import Tuple
 
-from time import sleep
-
-data_thread_running = False
-reset_vlc = False
 args = None
 osd = None
 
@@ -36,62 +32,96 @@ def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
 
-def data_thread(login: str):
-    global data_thread_running
-    global reset_vlc
+class VideoPlayer:
+    def __init__(self, hostname: str, login: str):
+        # TODO could go for non-blocking and read more than one block in process
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.s.connect((hostname.encode('utf-8'), 37890))
 
-    eprint('data-thread start')
+        self.s.send((login + '\r\n').encode('utf-8'))
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect((args.hostname[0], 37890))
+        data = self.s.recv(6).decode('utf-8')
+        if data != 'DATA\r\n':
+            eprint('unexpected response DATA, got', data)
 
-    s.send((login + '\r\n').encode('utf-8'))
+        self.total = 0
+        self.current_position = 0
+        self.discard_until = 0
 
-    data = s.recv(6).decode('utf-8')
-    if data != 'DATA\r\n':
-        eprint('unexpected response DATA, got', data)
+        self.vlc = Popen(['vlc', '-',
+                          '--intf', 'rc',
+                          '--rc-host', 'localhost:23456'], stdin=PIPE)
+        time.sleep(0.5)
+        self.vlc_rc_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.vlc_rc_socket.connect(('localhost', 23456))
+        self.state = 0
 
-    data_thread_running = True
+    def __del__(self):
+        self.vlc.stdin.close()
+        self.vlc.send_signal(2)
+        self.vlc.wait()
 
-    total = 0
+    def play(self):
+        self.vlc_rc_socket.send('play\n'.encode('utf-8'))
 
-    vlc = None
+    def stop(self):
+        self.vlc_rc_socket.send('stop\n'.encode('utf-8'))
+        self.state = 0
 
-    while True:
-        data = read_exact(s, 13)
+    def skip(self):
+        pass
+
+    def discard(self, position: int, framepos: int):
+        if self.current_position > position:
+            eprint('discarding to position which already has passed - doing nothing', position, self.current_position)
+            return
+
+        #self.discard_until = position
+        self.skip()
+
+    def still(self):
+        pass
+
+    def process(self):
+        data = read_exact(self.s, 13)
         if len(data) != 13:
             eprint('header-length failed')
-            break
+            return False
 
         pos, l, stream = struct.unpack('>QIB', data[0:13])
         # eprint(pos, l, stream, len(data))
 
-        data = read_exact(s, l)
+        data = read_exact(self.s, l)
         if len(data) != l:
             eprint('payload-data-length failed', len(data), l)
-            break
+            return False
 
-        total += l
-        if total > 5e7:
-            eprint('50MB received', total)
-            total = 0
+        if stream == 255:
+            info = data.decode('utf-8').strip()
+            eprint('data-stream-info', info, self.current_position, l)
+            #if info.startswith('BLANK'):
+            #     self.stop()
+            return True
 
-        if vlc is None:
-            vlc = Popen(['cvlc', '-', '--intf', 'dummy'], stdin=PIPE)
+        self.current_position = pos
 
-        if vlc is not None:
-            vlc.stdin.write(data)
+        if self.current_position >= self.discard_until:
+            self.vlc.stdin.write(data)
+            if self.state == 0:
+                eprint('would play again')
+                self.state = 1
+            # self.play()
+        else:
+            eprint('discarding', self.current_position, self.discard_until)
 
-        if reset_vlc:
-            if vlc is not None:
-                vlc.stdin.close()
-                vlc.send_signal(2)
-                vlc.wait()
-                vlc = None
-            reset_vlc = False
-    s.close()
+        self.total += l
+        if self.total > 5e7:
+            eprint('50MB received')
+            self.total = 0
 
-    eprint('data-thread ended')
+
+        return True
+
 
 
 class OSDCommandId(Enum):
@@ -262,7 +292,7 @@ def osdcmd(s: socket.socket):
 
     data = buf + read_exact(s, l - 1)
 
-    cmd = OSDCommand(data, open('osd.data', 'ab'))
+    cmd = OSDCommand(data)
 
     cmd.set_palette(read_exact(s, cmd.colors * 4))
     cmd.set_data(read_exact(s, cmd.datalen))
@@ -270,12 +300,12 @@ def osdcmd(s: socket.socket):
     osd.process(cmd)
 
 
-def process_line(s: socket.socket, line: str):
+def process_line(s: socket.socket, line: str, vp: VideoPlayer):
     if line.startswith('OSDCMD'):
         osdcmd(s)
-    elif line.startswith('STILL'):
-        global reset_vlc
-        reset_vlc = True
+    elif line.startswith('DISCARD'):
+        curpos, framepos = [int(i) for i in line.split(' ')[1:]]
+        vp.discard(curpos, framepos)
     else:
         eprint('unhandled command', line)
 
@@ -300,8 +330,7 @@ if __name__ == '__main__':
 
     if args.list_event_devices:
         eprint('available input devices (make sure adding your user to the input-group')
-        devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
-        for device in devices:
+        for device in [evdev.InputDevice(path) for path in evdev.list_devices()]:
             eprint(' ', device.path, device.name, device.phys)
         sys.exit(0)
 
@@ -320,15 +349,9 @@ if __name__ == '__main__':
     control_sockname = s.getsockname()
     uint = [int(i) for i in control_sockname[0].split('.')]
     uint = (uint[0] << 24) | (uint[1] << 16) | (uint[2] << 8) | (uint[3] << 0)
-    out = f'DATA {client_id} 0x{uint:08x}:{control_sockname[1]} {control_sockname[0]}'
+    login = f'DATA {client_id} 0x{uint:08x}:{control_sockname[1]} {control_sockname[0]}'
 
-    # yeah, let's add a thread and have no way to stop it correctly!
-    eprint('waiting for data-thread to run')
-    data_thread = Thread(target=data_thread, args=[out])
-    data_thread.start()
-    while not data_thread_running:
-        sleep(0.1)
-    eprint('data-thread is running')
+    video_player = VideoPlayer(args.hostname[0], login)
 
     s.send('INFO WINDOWS 1280x720\r\n'.encode('utf-8'))
     s.send('INFO ARGBOSD RLE\r\n'.encode('utf-8'))
@@ -336,17 +359,13 @@ if __name__ == '__main__':
 
     sel = selectors.DefaultSelector()
     sel.register(s, selectors.EVENT_READ)
+    sel.register(video_player.s, selectors.EVENT_READ)
 
     if args.event_device:
         event_device = evdev.InputDevice(args.event_device)
         sel.register(event_device, selectors.EVENT_READ)
     else:
         event_device = None
-
-    # for event in device.read_loop():
-    #     if event.
-    #         if event.type == evdev.ecodes.EV_KEY:
-    #             eprint(evdev.categorize(event))
 
     line = b""
     connected = True
@@ -361,22 +380,18 @@ if __name__ == '__main__':
                     break
 
                 if b == b'\n':
-                    process_line(s, line.decode('utf-8'))
+                    process_line(s, line.decode('utf-8'), video_player)
                     line = b""
                 elif b == b'\r':
                     pass
                 else:
                     line += b
+
             elif device == event_device:
                 for event in device.read():
                     if event.type == evdev.ecodes.EV_KEY and event.value in [1, 2]:
                         k = ecodes.KEY[event.code].split('_')[1].lower()
                         s.send(f'KEY {k}\r\n'.encode('utf-8'))
                         print(k)
-
-
-    s.close()
-
-    # yeah, that's right, have the thread magically stop
-    data_thread.join()
-    eprint("thread finished...exiting")
+            elif device == video_player.s:
+                video_player.process()
