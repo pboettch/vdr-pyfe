@@ -76,8 +76,12 @@ class VideoPlayer:
             return
 
         if self.vlc_rc_socket is None:
-            self.vlc_rc_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.vlc_rc_socket.connect(('localhost', 23456))
+            try:
+                self.vlc_rc_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.vlc_rc_socket.connect(('localhost', 23456))
+            except:
+                self.vlc_rc_socket = None
+                return
 
         if mode == 0:
             self.vlc_rc_socket.send('pause\n'.encode('utf-8'))
