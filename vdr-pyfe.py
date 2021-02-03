@@ -48,39 +48,41 @@ class VideoPlayer:
         self.current_position = 0
         self.discard_until = 0
 
-        self.vlc = Popen(['vlc', '-',
-                          '--intf', 'rc',
-                          '--rc-host', 'localhost:23456'], stdin=PIPE)
-        time.sleep(0.5)
-        self.vlc_rc_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.vlc_rc_socket.connect(('localhost', 23456))
-        self.state = 0
+        self.vlc = None
+        self.vlc_rc_socket = None
 
     def __del__(self):
-        self.vlc.stdin.close()
-        self.vlc.send_signal(2)
-        self.vlc.wait()
+        self.stop_vlc()
 
-    def play(self):
-        self.vlc_rc_socket.send('play\n'.encode('utf-8'))
+    def start_vlc(self):
+        if self.vlc is None:
+            self.vlc = Popen(['vlc', '-',
+                              '--intf', 'rc',
+                              '--rc-host', 'localhost:23456'], stdin=PIPE)
 
-    def stop(self):
-        self.vlc_rc_socket.send('stop\n'.encode('utf-8'))
-        self.state = 0
+    def stop_vlc(self):
+        if self.vlc_rc_socket is not None:
+            self.vlc_rc_socket.close()
+            self.vlc_rc_socket = None
 
-    def skip(self):
-        pass
+        if self.vlc:
+            self.vlc.stdin.close()
+            self.vlc.send_signal(2)
+            self.vlc.wait()
+            self.vlc = None
 
-    def discard(self, position: int, framepos: int):
-        if self.current_position > position:
-            eprint('discarding to position which already has passed - doing nothing', position, self.current_position)
+    def trickspeed(self, mode: int):
+        if self.vlc is None:
             return
 
-        #self.discard_until = position
-        self.skip()
+        if self.vlc_rc_socket is None:
+            self.vlc_rc_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.vlc_rc_socket.connect(('localhost', 23456))
 
-    def still(self):
-        pass
+        if mode == 0:
+            self.vlc_rc_socket.send('pause\n'.encode('utf-8'))
+        elif mode == 1:
+            self.vlc_rc_socket.send('play\n'.encode('utf-8'))
 
     def process(self):
         data = read_exact(self.s, 13)
@@ -99,18 +101,15 @@ class VideoPlayer:
         if stream == 255:
             info = data.decode('utf-8').strip()
             eprint('data-stream-info', info, self.current_position, l)
-            #if info.startswith('BLANK'):
-            #     self.stop()
+            if info.startswith('DISCARD'):
+                self.stop_vlc()
             return True
 
         self.current_position = pos
 
         if self.current_position >= self.discard_until:
+            self.start_vlc()
             self.vlc.stdin.write(data)
-            if self.state == 0:
-                eprint('would play again')
-                self.state = 1
-            # self.play()
         else:
             eprint('discarding', self.current_position, self.discard_until)
 
@@ -119,9 +118,7 @@ class VideoPlayer:
             eprint('50MB received')
             self.total = 0
 
-
         return True
-
 
 
 class OSDCommandId(Enum):
@@ -305,7 +302,9 @@ def process_line(s: socket.socket, line: str, vp: VideoPlayer):
         osdcmd(s)
     elif line.startswith('DISCARD'):
         curpos, framepos = [int(i) for i in line.split(' ')[1:]]
-        vp.discard(curpos, framepos)
+        # vp.discard(curpos, framepos)
+    elif line.startswith('TRICKSPEED'):
+        vp.trickspeed(int(line.split()[1]))
     else:
         eprint('unhandled command', line)
 
@@ -392,6 +391,6 @@ if __name__ == '__main__':
                     if event.type == evdev.ecodes.EV_KEY and event.value in [1, 2]:
                         k = ecodes.KEY[event.code].split('_')[1].lower()
                         s.send(f'KEY {k}\r\n'.encode('utf-8'))
-                        print(k)
+
             elif device == video_player.s:
                 video_player.process()
