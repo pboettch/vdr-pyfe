@@ -8,7 +8,9 @@ import socket
 import struct
 from subprocess import Popen, PIPE
 import sys
-import time
+
+from queue import Queue
+from threading import Thread
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -32,9 +34,50 @@ def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
 
+# data = read_exact(self.s, 13)
+class VideoBuffer:
+    HEADER_LEN = 13
+
+    def __init__(self, header: bytearray):
+        if len(header) != VideoBuffer.HEADER_LEN:
+            eprint('header-length failed', len(header))
+            return
+        self._pos, self._length, self._stream = struct.unpack('>QIB', header)
+        self._data = None
+
+    def __str__(self):
+        return f"VideoBuffer, position: {self._pos}, len: {self._length}, stream: {self._stream}"
+
+    @property
+    def stream(self):
+        return self._stream
+
+    @property
+    def length(self):
+        return self._length
+
+    @property
+    def type(self):
+        return self._type
+
+    def set_data(self, data: bytearray):
+        if len(data) != self._length:
+            eprint('insistent bytearray-length')
+            return False
+
+        self._data = data
+        return True
+
+    @property
+    def data(self):
+        return self._data
+
+    def data_as_string(self):
+        return self._data.decode('utf-8').strip()
+
+
 class VideoPlayer:
     def __init__(self, hostname: str, login: str):
-        # TODO could go for non-blocking and read more than one block in process
         self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.s.connect((hostname.encode('utf-8'), 37890))
 
@@ -44,15 +87,37 @@ class VideoPlayer:
         if data != 'DATA\r\n':
             eprint('unexpected response DATA, got', data)
 
+        self._queue = Queue()
+        self._thread = Thread(target=self._handle, args=())
+        self._thread.start()
+
         self.total = 0
         self.current_position = 0
         self.discard_until = 0
 
         self.vlc = None
-        self.vlc_rc_socket = None
 
     def __del__(self):
+        self._queue.put(None)
+        self._thread.join()
+
         self.stop_vlc()
+
+    def _handle(self):
+        while True:
+            buf = self._queue.get()
+            if buf is None:  # end request
+                break
+
+            if buf.stream == 255:
+                info = buf.data_as_string()
+                eprint('data-stream-info', info, self.current_position)
+                if info.startswith('DISCARD'):
+                    self.stop_vlc()
+                continue
+
+            self.start_vlc()
+            self.vlc.stdin.write(buf.data)
 
     def start_vlc(self):
         if self.vlc is None:
@@ -61,32 +126,31 @@ class VideoPlayer:
                               '--rc-host', 'localhost:23456'], stdin=PIPE)
 
     def stop_vlc(self):
-        if self.vlc_rc_socket is not None:
-            self.vlc_rc_socket.close()
-            self.vlc_rc_socket = None
-
         if self.vlc:
             self.vlc.stdin.close()
             self.vlc.send_signal(2)
             self.vlc.wait()
             self.vlc = None
 
+    def vlc_rc_send(self, cmd: str):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect(('localhost', 23456))
+            sock.send(cmd.encode('utf-8'))
+            sock.close()
+        except:
+            eprint('could not connect to vlc-rc')
+
     def trickspeed(self, mode: int):
+        eprint('trickspeed', mode)
         if self.vlc is None:
+            eprint(' vlc none')
             return
 
-        if self.vlc_rc_socket is None:
-            try:
-                self.vlc_rc_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.vlc_rc_socket.connect(('localhost', 23456))
-            except:
-                self.vlc_rc_socket = None
-                return
-
         if mode == 0:
-            self.vlc_rc_socket.send('pause\n'.encode('utf-8'))
+            self.vlc_rc_send('pause\n')
         elif mode == 1:
-            self.vlc_rc_socket.send('play\n'.encode('utf-8'))
+            self.vlc_rc_send('play\n')
 
     def process(self):
         data = read_exact(self.s, 13)
@@ -94,33 +158,30 @@ class VideoPlayer:
             eprint('header-length failed')
             return False
 
-        pos, l, stream = struct.unpack('>QIB', data[0:13])
-        # eprint(pos, l, stream, len(data))
+        buf = VideoBuffer(data)
 
-        data = read_exact(self.s, l)
-        if len(data) != l:
-            eprint('payload-data-length failed', len(data), l)
+        if not buf.set_data(read_exact(self.s, buf.length)):
             return False
 
-        if stream == 255:
-            info = data.decode('utf-8').strip()
-            eprint('data-stream-info', info, self.current_position, l)
-            if info.startswith('DISCARD'):
-                self.stop_vlc()
-            return True
+        self._queue.put(buf)
 
-        self.current_position = pos
+        if self._queue.qsize() % 200 == 0:
+            eprint('big queue', self._queue.qsize())
 
-        if self.current_position >= self.discard_until:
-            self.start_vlc()
-            self.vlc.stdin.write(data)
-        else:
-            eprint('discarding', self.current_position, self.discard_until)
+        # self.current_position = pos
 
-        self.total += l
-        if self.total > 5e7:
-            eprint('50MB received')
-            self.total = 0
+        # eprint('writing', len(data))
+        # if self.current_position >= self.discard_until:
+        #     eprint('started')
+        #     self.vlc.stdin.write(data)
+        #     eprint('after write vlc')
+        # else:
+        #     eprint('discarding', self.current_position, self.discard_until)
+
+        # self.total += l
+        # if self.total > 5e7:
+        #     eprint('50MB received')
+        #     self.total = 0
 
         return True
 
