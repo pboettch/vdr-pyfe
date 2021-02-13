@@ -19,9 +19,6 @@ from enum import Enum
 
 from typing import Tuple
 
-args = None
-osd = None
-
 
 def read_exact(s: socket.socket, l: int):
     data = b''
@@ -77,15 +74,8 @@ class VideoBuffer:
 
 
 class VideoPlayer:
-    def __init__(self, hostname: str, login: str):
+    def __init__(self):
         self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.s.connect((hostname.encode('utf-8'), 37890))
-
-        self.s.send((login + '\r\n').encode('utf-8'))
-
-        data = self.s.recv(6).decode('utf-8')
-        if data != 'DATA\r\n':
-            eprint('unexpected response DATA, got', data)
 
         self._queue = Queue()
         self._thread = Thread(target=self._handle, args=())
@@ -96,6 +86,16 @@ class VideoPlayer:
         self.discard_until = 0
 
         self.vlc = None
+
+    def connect(self, hostname: str, login: str):
+        self.s.connect((hostname.encode('utf-8'), 37890))
+        self.s.send((login + '\r\n').encode('utf-8'))
+
+        data = self.s.recv(6).decode('utf-8')
+        if data != 'DATA\r\n':
+            eprint('unexpected response DATA, got', data)
+            return False
+        return True
 
     def __del__(self):
         self._queue.put(None)
@@ -113,7 +113,8 @@ class VideoPlayer:
                 info = buf.data_as_string()
                 eprint('data-stream-info', info, self.current_position)
                 if info.startswith('DISCARD'):
-                    self.stop_vlc()
+                    self.vlc_rc_send('next\n')
+                    #self.stop_vlc()
                 continue
 
             self.start_vlc()
@@ -344,34 +345,81 @@ class OSDCommand():
 
 # see osd_command.h - osd_command_t
 
+class Control:
+    def __init__(self, vp: VideoPlayer, osd: OSD):
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._vp = vp
+        self._video_login = ""
+        self._line = b""
+        self._osd = osd
 
-def osdcmd(s: socket.socket):
-    buf = s.recv(1)
-    if len(buf) != 1:
-        eprint('error reading osdcmd')
+    def connect(self, hostname):
+        self.s.connect((hostname, 37890))
+        self.s.send('CONTROL\r\n'.encode('utf-8'))
 
-    l = int(buf[0])
+        data = self.s.recv(1024).decode('utf-8').split('\r\n')
+        if not data[0].startswith('VDR') and data[0].endswith('READY'):
+            eprint('error READY')
+            return False
 
-    data = buf + read_exact(s, l - 1)
+        client_id = int(data[1].split(' ')[1])
 
-    cmd = OSDCommand(data)
+        control_sockname = self.s.getsockname()
+        uint = [int(i) for i in control_sockname[0].split('.')]
+        uint = (uint[0] << 24) | (uint[1] << 16) | (uint[2] << 8) | (uint[3] << 0)
+        self._video_login = f'DATA {client_id} 0x{uint:08x}:{control_sockname[1]} {control_sockname[0]}'
+        return True
 
-    cmd.set_palette(read_exact(s, cmd.colors * 4))
-    cmd.set_data(read_exact(s, cmd.datalen))
+    def video_login(self):
+        return self._video_login
 
-    osd.process(cmd)
+    def send_basic_info(self):
+        self.s.send('INFO WINDOWS 1280x720\r\n'.encode('utf-8'))
+        self.s.send('INFO ARGBOSD RLE\r\n'.encode('utf-8'))
+        self.s.send('CONFIG\r\n'.encode('utf-8'))
 
+    def process(self):
+        b = self.s.recv(1)
+        if len(b) == 0:
+            eprint('error while reading - connection closed probably')
+            return False
 
-def process_line(s: socket.socket, line: str, vp: VideoPlayer):
-    if line.startswith('OSDCMD'):
-        osdcmd(s)
-    elif line.startswith('DISCARD'):
-        curpos, framepos = [int(i) for i in line.split(' ')[1:]]
-        # vp.discard(curpos, framepos)
-    elif line.startswith('TRICKSPEED'):
-        vp.trickspeed(int(line.split()[1]))
-    else:
-        eprint('unhandled command', line)
+        if b == b'\n':
+            self.process_line(self._line.decode('utf-8'))
+            self._line = b""
+        elif b == b'\r':
+            pass
+        else:
+            self._line += b
+        return True
+
+    def osdcmd(self):
+        buf = self.s.recv(1)
+        if len(buf) != 1:
+            eprint('error reading osdcmd')
+
+        l = int(buf[0])
+
+        data = buf + read_exact(self.s, l - 1)
+
+        cmd = OSDCommand(data)
+
+        cmd.set_palette(read_exact(self.s, cmd.colors * 4))
+        cmd.set_data(read_exact(self.s, cmd.datalen))
+
+        if osd:
+            osd.process(cmd)
+
+    def process_line(self, line: str):
+        if line.startswith('OSDCMD'):
+            self.osdcmd()
+        # elif line.startswith('DISCARD'):
+        #    curpos, framepos = [int(i) for i in line.split(' ')[1:]]
+        #    # vp.discard(curpos, framepos)
+        elif line.startswith('TRICKSPEED'):
+            self._vp.trickspeed(int(line.split()[1]))
+        else:
+            eprint('unhandled command', line)
 
 
 if __name__ == '__main__':
@@ -398,31 +446,21 @@ if __name__ == '__main__':
             eprint(' ', device.path, device.name, device.phys)
         sys.exit(0)
 
-    osd = OSD()
+    if args.osd:
+        osd = OSD()
+    else:
+        osd = None
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect((args.hostname[0], 37890))
-    s.send('CONTROL\r\n'.encode('utf-8'))
+    video_player = VideoPlayer()
+    control = Control(video_player, osd)
 
-    data = s.recv(1024).decode('utf-8').split('\r\n')
-    if not data[0].startswith('VDR') and data[0].endswith('READY'):
-        eprint('error READY')
+    control.connect(args.hostname[0])
+    video_player.connect(args.hostname[0], control.video_login())
 
-    client_id = int(data[1].split(' ')[1])
-
-    control_sockname = s.getsockname()
-    uint = [int(i) for i in control_sockname[0].split('.')]
-    uint = (uint[0] << 24) | (uint[1] << 16) | (uint[2] << 8) | (uint[3] << 0)
-    login = f'DATA {client_id} 0x{uint:08x}:{control_sockname[1]} {control_sockname[0]}'
-
-    video_player = VideoPlayer(args.hostname[0], login)
-
-    s.send('INFO WINDOWS 1280x720\r\n'.encode('utf-8'))
-    s.send('INFO ARGBOSD RLE\r\n'.encode('utf-8'))
-    s.send('CONFIG\r\n'.encode('utf-8'))
+    control.send_basic_info()
 
     sel = selectors.DefaultSelector()
-    sel.register(s, selectors.EVENT_READ)
+    sel.register(control.s, selectors.EVENT_READ)
     sel.register(video_player.s, selectors.EVENT_READ)
 
     if args.event_device:
@@ -436,26 +474,15 @@ if __name__ == '__main__':
     while connected:
         for key, mask in sel.select():
             device = key.fileobj
-            if device == s:
-                b = s.recv(1)
-                if len(b) == 0:
-                    eprint('error while reading - connection closed probably')
-                    connected = False
-                    break
 
-                if b == b'\n':
-                    process_line(s, line.decode('utf-8'), video_player)
-                    line = b""
-                elif b == b'\r':
-                    pass
-                else:
-                    line += b
+            if device == control.s:
+                control.process()
 
             elif device == event_device:
                 for event in device.read():
                     if event.type == evdev.ecodes.EV_KEY and event.value in [1, 2]:
                         k = ecodes.KEY[event.code].split('_')[1].lower()
-                        s.send(f'KEY {k}\r\n'.encode('utf-8'))
+                        control.s.send(f'KEY {k}\r\n'.encode('utf-8'))
 
             elif device == video_player.s:
                 video_player.process()
