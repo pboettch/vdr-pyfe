@@ -72,6 +72,81 @@ class VideoBuffer:
     def data_as_string(self):
         return self._data.decode('utf-8').strip()
 
+    def guck_mal(self):
+        if self._length % 188:
+            print('not multiple 188')
+            return
+
+        for i in range(0, self._length, 188):
+            if self._data[i] != 0x47:
+                print('not TS')
+                continue
+
+            if not self._data[i+1] & 0x40:
+                continue
+
+            offset = 4
+            if self._data[i+3] & 0x20:
+                offset = 5 + self._data[i+4]
+
+            print('pusi', offset,self._data[i + offset:i + offset+ 3] )
+
+            if self._data[i + offset:i + offset + 3] != b'\0\0\1':
+                continue
+            print('PES')
+
+            AUDIO_STREAM_MASK = ~0x1F
+            VIDEO_STREAM_MASK = ~0x0F
+            AUDIO_STREAM      = 0xC0
+            VIDEO_STREAM      = 0xE0
+            if self._data[i + offset + 3] & VIDEO_STREAM_MASK == VIDEO_STREAM:
+                print('VIDEO')
+
+            if self._data[i + offset + 6] & 0xc0 != 0x80:
+                print('no PTS')
+
+            if self._data[i + offset + 6] & 0x30 != 0:
+                print('no PTS')
+
+            if self._data[i + offset + 7] & 0x80:
+
+                b = self._data[i + offset + 9: i + offset + 14]
+                ts =  (b[0] & 0x0e) << 29
+                ts |= (b[1]       ) << 22
+                ts |= (b[2] & 0xfe) << 14
+                ts |= (b[3]       ) << 7
+                ts |= (b[4] & 0xfe) >> 1
+                print('pts', ts, self._pos)
+
+
+#   if (IS_VIDEO_PACKET(buf) || IS_AUDIO_PACKET(buf)) {
+#
+#     if ((buf[6] & 0xC0) != 0x80)
+#       return NO_PTS;
+#     if ((buf[6] & 0x30) != 0)
+#       return NO_PTS;
+#
+#     if ((len > 13) && (buf[7] & 0x80)) { /* pts avail */
+#       return parse_timestamp(buf + 9);
+#     }
+#   }
+#   return NO_PTS;
+
+#define IS_VIDEO_PACKET(data)      (VIDEO_STREAM    == ((data)[3] & ~VIDEO_STREAM_MASK))
+#define IS_MPEG_AUDIO_PACKET(data) (AUDIO_STREAM    == ((data)[3] & ~AUDIO_STREAM_MASK))
+#define IS_PS1_PACKET(data)        (PRIVATE_STREAM1 == (data)[3])
+#define IS_PADDING_PACKET(data)    (PADDING_STREAM  == (data)[3])
+#define IS_AUDIO_PACKET(data)      (IS_MPEG_AUDIO_PACKET(data) || IS_PS1_PACKET(data))
+#define PRIVATE_STREAM1   0xBD
+#define PADDING_STREAM    0xBE
+#define PRIVATE_STREAM2   0xBF
+#define AUDIO_STREAM_S    0xC0      /* 1100 0000 */
+#define AUDIO_STREAM_E    0xDF      /* 1101 1111 */
+#define VIDEO_STREAM_S    0xE0      /* 1110 0000 */
+#define VIDEO_STREAM_E    0xEF      /* 1110 1111 */
+
+
+
 
 class VideoPlayer:
     def __init__(self):
@@ -118,6 +193,7 @@ class VideoPlayer:
                 continue
 
             self.start_vlc()
+            buf.guck_mal()
             self.vlc.stdin.write(buf.data)
 
     def start_vlc(self):
