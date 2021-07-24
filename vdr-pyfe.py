@@ -574,8 +574,24 @@ if __name__ == '__main__':
             elif device == event_device:
                 for event in device.read():
                     if event.type == evdev.ecodes.EV_KEY and event.value in [1, 2]:
-                        k = ecodes.KEY[event.code].split('_')[1].lower()
-                        control.s.send(f'KEY {k}\r\n'.encode('utf-8'))
+                        event_to_xkey = {
+                            'KEY_UP': 'Up',
+                            'KEY_LEFT': 'Left',
+                            'KEY_RIGHT': 'Right',
+                            'KEY_DOWN': 'Down',
+                            'KEY_ENTER': 'Return',
+                            'KEY_F1': 'F1',
+                            'KEY_F2': 'F2',
+                            'KEY_F3': 'F3',
+                            'KEY_F4': 'F4',
+                            'KEY_BACKSPACE': 'BackSpace',
+                        }
+                        key_event_code = ecodes.KEY[event.code]
+                        k = event_to_xkey.get(key_event_code, None)
+                        if k is None:
+                            k = key_event_code.split('_')[1].lower()
+                        print('key', k, ecodes.KEY[event.code])
+                        control.s.send(f'KEY XKeySym {k}\r\n'.encode('utf-8'))
 
             elif device == video_player.s:
                 video_player.process()
