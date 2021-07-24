@@ -19,6 +19,8 @@ from enum import Enum
 
 from typing import Tuple
 
+from picamera.renderers import PiOverlayRenderer
+
 
 def read_exact(s: socket.socket, l: int):
     data = b''
@@ -193,7 +195,7 @@ class VideoPlayer:
                 continue
 
             self.start_vlc()
-            buf.guck_mal()
+            # buf.guck_mal()
             self.vlc.stdin.write(buf.data)
 
     def start_vlc(self):
@@ -281,9 +283,11 @@ class OSD:
     def __init__(self):
         self.image = np.zeros((1, 1, 1))
 
-        if args.osd:
-            plt.ion()
-            plt.show()
+        self.renderer = None
+
+        # if args.osd:
+        #     plt.ion()
+        #     plt.show()
 
     def _decode_length(self, b: bytes, i: int):
         l = b[i] & 0x3f
@@ -345,12 +349,21 @@ class OSD:
 
             rle += 1
 
+        current_renderer = self.renderer
+        self.renderer = PiOverlayRenderer(None, self.image.tobytes(),
+                                          resolution=(self.image.shape[1], self.image.shape[0]),
+                                          layer=31,
+                                          format='rgba')
+
+        if current_renderer:
+            current_renderer.close()
+
         # eprint(i, num_rle, rle )
-        if args.osd:
-            plt.clf()
-            plt.imshow(self.image)
-            plt.draw()
-            plt.pause(0.01)
+        # if args.osd:
+        #     plt.clf()
+        #     plt.imshow(self.image)
+        #     plt.draw()
+        #     plt.pause(0.01)
 
     def set_dimensions(self, w, h):
         self.image = np.zeros((h, w, 4), dtype=np.uint8)
@@ -361,10 +374,13 @@ class OSD:
 
     def close(self):
         eprint('close')
-        if args.osd:
-            plt.clf()
-            plt.draw()
-            plt.pause(0.01)
+        if self.renderer:
+            self.renderer.close()
+
+        # if args.osd:
+        #     plt.clf()
+        #     plt.draw()
+        #     plt.pause(0.01)
 
     def process(self, cmd):
         if cmd.id == OSDCommandId.OSD_Set_ARGBRLE:
@@ -473,6 +489,7 @@ class Control:
         buf = self.s.recv(1)
         if len(buf) != 1:
             eprint('error reading osdcmd')
+            return
 
         l = int(buf[0])
 
@@ -483,8 +500,8 @@ class Control:
         cmd.set_palette(read_exact(self.s, cmd.colors * 4))
         cmd.set_data(read_exact(self.s, cmd.datalen))
 
-        if osd:
-            osd.process(cmd)
+        if self._osd:
+            self._osd.process(cmd)
 
     def process_line(self, line: str):
         if line.startswith('OSDCMD'):
