@@ -41,6 +41,10 @@ class MatPlotLibRenderer(OSDRenderer):
 
     def render(self, image: np.array):
         plt.clf()
+
+        buffer = image.tobytes()
+        image = np.frombuffer(buffer, dtype=np.uint8).reshape(*image.shape, 4)
+
         plt.imshow(image)
         plt.draw()
         plt.pause(0.01)
@@ -68,10 +72,14 @@ class OSD:
         y = 0
         x = 0
 
-        sub_image = self.image[pos[1]:pos[1] + dim[1], pos[0]:pos[0] + dim[0]]
-        sub_image[::] = 0
+        dt = np.dtype(np.uint32)
+        dt = dt.newbyteorder('<')
 
-        eprint(pos, dim, dirty)
+        sub_image = self.image[pos[1]:pos[1] + dim[1], pos[0]:pos[0] + dim[0]]
+        sub_image.fill(0)
+
+        def _color(b, i):
+            return np.frombuffer(b[i:i + 4], dtype=dt)
 
         t0 = time.time()
         while i < len(b):
@@ -80,14 +88,9 @@ class OSD:
             if y > dim[1]:
                 eprint('not good, height')
 
-            if b[i] != 0:
-                # one pixel
-                c = struct.unpack('BBBB', b[i:i + 4])
-                sub_image[y, x] = [c[1], c[2], c[3], c[0]]
-                # sub_image[y, x] = [c[0], c[1], c[2], c[3]]
-                # eprint('pixel', argb)
+            if b[i] != 0:  # one pixel
+                sub_image[y, x] = _color(b, i)
                 i += 4
-
                 x += 1
             else:
                 i += 1  # skip marker
@@ -101,14 +104,13 @@ class OSD:
                         y += 1
                         x = 0
                 else:
-                    c = struct.unpack('BBBB', b[i:i + 4])
-                    sub_image[y, x:x + l] = [c[1], c[2], c[3], c[0]]
-                    # sub_image[y, x:x + l] = [c[0], c[1], c[2], c[3]]
+                    sub_image[y, x:x + l] = _color(b, i)
                     x += l
                     i += 4
-
             rle += 1
 
+        # ARGB -> RGBA
+        sub_image[:] = (sub_image >> 8) | (sub_image << 24)
         t1 = time.time()
 
         eprint('set_argbrle, rendering:', t1 - t0)
@@ -116,11 +118,9 @@ class OSD:
         self.renderer.render(self.image)
 
     def set_dimensions(self, w, h):
-        eprint('OSD dimensions', w, h)
-        self.image = np.zeros((h, w, 4), dtype=np.uint8)
+        self.image = np.zeros((h, w), dtype=np.uint32)
 
     def flush(self):
-        eprint('flush')
         self.image[:] = 0
 
     def close(self):
