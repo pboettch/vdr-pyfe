@@ -81,7 +81,7 @@ class OSD:
         def _color(b, i):
             return np.frombuffer(b[i:i + 4], dtype=dt)
 
-        t0 = time.time()
+        # t0 = time.time()
         while i < len(b):
             if x > dim[0]:
                 eprint('not good, width')
@@ -111,9 +111,9 @@ class OSD:
 
         # ARGB -> RGBA
         sub_image[:] = (sub_image >> 8) | (sub_image << 24)
-        t1 = time.time()
+        # t1 = time.time()
 
-        eprint('set_argbrle, rendering:', t1 - t0)
+        # eprint('set_argbrle, rendering:', t1 - t0)
 
         self.renderer.render(self.image)
 

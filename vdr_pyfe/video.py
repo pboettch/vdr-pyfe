@@ -146,7 +146,7 @@ class VideoPlayer:
             return False
         return True
 
-    def __del__(self):
+    def stop(self):
         self._queue.put(None)
         self._thread.join()
 

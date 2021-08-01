@@ -3,6 +3,7 @@ import evdev
 from evdev import ecodes
 import selectors
 import sys
+import time
 
 from .osd import OSD
 from .video import VideoPlayer
@@ -13,12 +14,10 @@ from . import eprint
 def main():
     parser = argparse.ArgumentParser(prog='VDR-PYFE')
 
-    available_renderers = ['plt', 'rpi']
-
     parser.add_argument('-o', '--osd',
                         help='enable OSD-display',
                         type=str,
-                        choices=available_renderers)
+                        choices=['plt', 'rpi'])
     parser.add_argument('--list-event-devices',
                         help='list all available input devices',
                         action='store_true')
@@ -67,33 +66,49 @@ def main():
     line = b""
     connected = True
     while connected:
-        for key, mask in sel.select():
-            device = key.fileobj
+        try:
+            for key, mask in sel.select():
+                device = key.fileobj
 
-            if device == control.s:
-                control.process()
+                if device == control.s:
+                    t0 = time.time()
+                    control.process()
+                    t1 = time.time()
+                    eprint('control-process took', t1 - t0)
 
-            elif device == event_device:
-                for event in device.read():
-                    if event.type == evdev.ecodes.EV_KEY and event.value in [1, 2]:
-                        event_to_xkey = {
-                            'KEY_UP': 'Up',
-                            'KEY_LEFT': 'Left',
-                            'KEY_RIGHT': 'Right',
-                            'KEY_DOWN': 'Down',
-                            'KEY_ENTER': 'Return',
-                            'KEY_F1': 'F1',
-                            'KEY_F2': 'F2',
-                            'KEY_F3': 'F3',
-                            'KEY_F4': 'F4',
-                            'KEY_BACKSPACE': 'BackSpace',
-                        }
-                        key_event_code = ecodes.KEY[event.code]
-                        k = event_to_xkey.get(key_event_code, None)
-                        if k is None:
-                            k = key_event_code.split('_')[1].lower()
-                        eprint('key', k, ecodes.KEY[event.code])
-                        control.s.send(f'KEY XKeySym {k}\r\n'.encode('utf-8'))
+                elif device == event_device:
+                    for event in device.read():
+                        if event.type == evdev.ecodes.EV_KEY and event.value in [1, 2]:
+                            event_to_xkey = {
+                                'KEY_UP': 'Up',
+                                'KEY_LEFT': 'Left',
+                                'KEY_RIGHT': 'Right',
+                                'KEY_DOWN': 'Down',
+                                'KEY_ENTER': 'Return',
+                                'KEY_F1': 'F1',
+                                'KEY_F2': 'F2',
+                                'KEY_F3': 'F3',
+                                'KEY_F4': 'F4',
+                                'KEY_BACKSPACE': 'BackSpace',
+                            }
+                            key_event_code = ecodes.KEY[event.code]
+                            k = event_to_xkey.get(key_event_code, None)
+                            if k is None:
+                                k = key_event_code.split('_')[1].lower()
 
-            elif device == video_player.s:
-                video_player.process()
+                            if k == 'esc':
+                                connected = False
+                                break
+
+                            eprint('key', k, ecodes.KEY[event.code])
+                            control.s.send(f'KEY XKeySym {k}\r\n'.encode('utf-8'))
+
+                elif device == video_player.s:
+                    video_player.process()
+
+                if not connected:
+                    break
+        except KeyboardInterrupt:
+            connected = False
+
+    video_player.stop()
