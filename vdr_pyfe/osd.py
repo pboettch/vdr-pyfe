@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import struct
 import time
+from threading import Thread
+from queue import Queue
 from typing import Tuple
 
 from . import OSDRenderer, eprint
@@ -36,10 +38,14 @@ def _decode_length(b: bytes, i: int):
 
 class MatPlotLibRenderer(OSDRenderer):
     def __init__(self):
-        plt.ion()
-        plt.show()
+        self._init = False
 
     def render(self, image: np.array):
+        if not self._init:
+            plt.ion()
+            plt.show()
+            self._init = True
+
         plt.clf()
 
         buffer = image.tobytes()
@@ -59,7 +65,38 @@ class OSD:
     def __init__(self, renderer: OSDRenderer):
         self.image = np.zeros((1, 1, 1))
 
+        self._queue = Queue()
+        self._thread = Thread(target=self._handle, args=())
+        self._thread.start()
+
         self.renderer = renderer
+
+    def _handle(self):
+        while True:
+            cmd = self._queue.get()
+            if cmd is None:  # end request
+                break
+
+            eprint(cmd.id)
+            if cmd.id == OSDCommandId.OSD_Set_ARGBRLE:
+                self.set_argbrle_data(cmd.data_raw_data, cmd.num_rle,
+                                      (cmd.x, cmd.y), (cmd.w, cmd.h),
+                                      ((cmd.dirty_area_x1, cmd.dirty_area_y1),
+                                       (cmd.dirty_area_x2, cmd.dirty_area_y2)))
+            elif cmd.id == OSDCommandId.OSD_Size:
+                self.set_dimensions(cmd.w, cmd.h)
+            elif cmd.id == OSDCommandId.OSD_Close:
+                self.close()
+            elif cmd.id == OSDCommandId.OSD_Flush:
+                self.flush()
+            else:
+                eprint('unhandled osd-command', cmd.id)
+        self.flush()
+        self.close()
+
+    def exit(self):
+        self._queue.put(None)
+        self._thread.join()
 
     def set_argbrle_data(self, b: bytes,
                          num_rle: int,
@@ -127,20 +164,7 @@ class OSD:
         self.renderer.clear()
 
     def process(self, cmd):
-        eprint(cmd.id)
-        if cmd.id == OSDCommandId.OSD_Set_ARGBRLE:
-            self.set_argbrle_data(cmd.data_raw_data, cmd.num_rle,
-                                  (cmd.x, cmd.y), (cmd.w, cmd.h),
-                                  ((cmd.dirty_area_x1, cmd.dirty_area_y1),
-                                   (cmd.dirty_area_x2, cmd.dirty_area_y2)))
-        elif cmd.id == OSDCommandId.OSD_Size:
-            self.set_dimensions(cmd.w, cmd.h)
-        elif cmd.id == OSDCommandId.OSD_Close:
-            self.close()
-        elif cmd.id == OSDCommandId.OSD_Flush:
-            self.flush()
-        else:
-            eprint('unhandled osd-command', cmd.id)
+        self._queue.put(cmd)
 
 
 class OSDCommand():

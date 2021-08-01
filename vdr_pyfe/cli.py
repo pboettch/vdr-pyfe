@@ -74,7 +74,8 @@ def main():
                     t0 = time.time()
                     control.process()
                     t1 = time.time()
-                    eprint('control-process took', t1 - t0)
+                    if t1 - t0 > 0.001:
+                        eprint('control-process took - too slow', t1 - t0)
 
                 elif device == event_device:
                     for event in device.read():
@@ -111,4 +112,6 @@ def main():
         except KeyboardInterrupt:
             connected = False
 
-    video_player.stop()
+    video_player.exit()
+    if osd:
+        osd.exit()

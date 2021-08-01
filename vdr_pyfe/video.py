@@ -146,11 +146,9 @@ class VideoPlayer:
             return False
         return True
 
-    def stop(self):
+    def exit(self):
         self._queue.put(None)
         self._thread.join()
-
-        self.stop_vlc()
 
     def _handle(self):
         while True:
@@ -171,6 +169,8 @@ class VideoPlayer:
             self.vlc.stdin.write(buf.data)
             # self.output.write(buf.data)
             # self.sock.sendto(buf.data, ('yaise-pc1', 5050))
+
+        self.stop_vlc()
 
     def start_vlc(self):
         if self.vlc is None:
