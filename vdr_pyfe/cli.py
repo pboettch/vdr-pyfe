@@ -55,7 +55,6 @@ def main():
 
     sel = selectors.DefaultSelector()
     sel.register(control.s, selectors.EVENT_READ)
-    sel.register(video_player.s, selectors.EVENT_READ)
 
     if args.event_device:
         event_device = evdev.InputDevice(args.event_device)
@@ -103,9 +102,6 @@ def main():
 
                             eprint('key', k, ecodes.KEY[event.code])
                             control.s.send(f'KEY XKeySym {k}\r\n'.encode('utf-8'))
-
-                elif device == video_player.s:
-                    video_player.process()
 
                 if not connected:
                     break

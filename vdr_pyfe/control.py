@@ -76,9 +76,9 @@ class Control:
     def process_line(self, line: str):
         if line.startswith('OSDCMD'):
             self.osdcmd()
-        # elif line.startswith('DISCARD'):
-        #    curpos, framepos = [int(i) for i in line.split(' ')[1:]]
-        #    # vp.discard(curpos, framepos)
+        elif line.startswith('DISCARD'):
+            curpos, _ = map(int, line.split(' ')[1:])  # second int: framepos
+            self._vp.discard_until(curpos)
         elif line.startswith('TRICKSPEED'):
             self._vp.trickspeed(int(line.split()[1]))
         else:

@@ -1,5 +1,6 @@
 from subprocess import Popen, PIPE
 from queue import Queue
+import selectors
 import socket
 import struct
 from threading import Thread
@@ -19,6 +20,10 @@ class VideoBuffer:
 
     def __str__(self):
         return f"VideoBuffer, position: {self._pos}, len: {self._length}, stream: {self._stream}"
+
+    @property
+    def position(self):
+        return self._pos
 
     @property
     def stream(self):
@@ -124,15 +129,16 @@ class VideoPlayer:
     def __init__(self):
         self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        self._queue = Queue()
+        self._queue = Queue(maxsize=50)
         self._thread = Thread(target=self._handle, args=())
         self._thread.start()
 
-        self.total = 0
-        self.current_position = 0
-        self.discard_until = 0
+        # self.total = 0
+        # self.current_position = 0
+        self._discard_timestamp = 0
 
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # UDP
+        self._reader_thread_running = False
+        self._reader_thread = Thread(target=self._reader, args=())
 
         self.vlc = None
 
@@ -144,31 +150,73 @@ class VideoPlayer:
         if data != 'DATA\r\n':
             eprint('unexpected response DATA, got', data)
             return False
+
+        self._reader_thread_running = True
+        self._reader_thread.start()
+
         return True
 
     def exit(self):
+        eprint('closing socket')
+        self._reader_thread_running = False
+        self._reader_thread.join()
+
         self._queue.put(None)
         self._thread.join()
+
+    def _reader(self):
+        sel = selectors.DefaultSelector()
+        sel.register(self.s, selectors.EVENT_READ)
+
+        while self._reader_thread_running:
+            for key, mask in sel.select(timeout=1):
+                device = key.fileobj
+                assert device == self.s
+
+                data = read_exact(self.s, 13)
+                if len(data) != 13:
+                    eprint('header-length failed')
+                    self._reader_thread_running = False
+                    break
+
+                buf = VideoBuffer(data)
+
+                if not buf.set_data(read_exact(self.s, buf.length)):
+                    self._reader_thread_running = False
+                    break
+
+                self._queue.put(buf)
+
+                if self._queue.qsize() > 200 == 0:
+                    eprint('big queue', self._queue.qsize())
+
+        eprint('video-reader-thread has ended')
 
     def _handle(self):
         while True:
             buf = self._queue.get()
             if buf is None:  # end request
                 break
+            self._queue.task_done()
 
             if buf.stream == 255:
                 info = buf.data_as_string()
-                eprint('data-stream-info', info, self.current_position)
+                eprint('data-stream-info', info)
                 if info.startswith('DISCARD'):
                     self.vlc_rc_send('next\n')
                     # self.stop_vlc()
                 continue
 
+            if self._discard_timestamp > buf.position:
+                print(f'discarding f{buf}')
+                continue
+
             self.start_vlc()
             # buf.guck_mal()
+
+            # print(f'writing {buf} to vlc')
             self.vlc.stdin.write(buf.data)
             # self.output.write(buf.data)
-            # self.sock.sendto(buf.data, ('yaise-pc1', 5050))
 
         self.stop_vlc()
 
@@ -206,35 +254,5 @@ class VideoPlayer:
         elif mode == 1:
             self.vlc_rc_send('play\n')
 
-    def process(self):
-        data = read_exact(self.s, 13)
-        if len(data) != 13:
-            eprint('header-length failed')
-            return False
-
-        buf = VideoBuffer(data)
-
-        if not buf.set_data(read_exact(self.s, buf.length)):
-            return False
-
-        self._queue.put(buf)
-
-        if self._queue.qsize() % 200 == 0:
-            eprint('big queue', self._queue.qsize())
-
-        # self.current_position = pos
-
-        # eprint('writing', len(data))
-        # if self.current_position >= self.discard_until:
-        #     eprint('started')
-        #     self.vlc.stdin.write(data)
-        #     eprint('after write vlc')
-        # else:
-        #     eprint('discarding', self.current_position, self.discard_until)
-
-        # self.total += l
-        # if self.total > 5e7:
-        #     eprint('50MB received')
-        #     self.total = 0
-
-        return True
+    def discard_until(self, ts):
+        self._discard_timestamp = ts
